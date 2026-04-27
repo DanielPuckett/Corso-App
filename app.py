@@ -574,7 +574,7 @@ class CorsoApp(App):
 
         self.marked.clear()
         self._status(f"Deleted {deleted} snapshots. Reload to refresh.")
-        self.push_screen(OutputScreen("Delete Results", "\n".join(outputs) or "Deletion completed."))
+        self.push_screen(OutputScreen("Delete Results", "\n".join(o for o in outputs if o.strip()) or f"Deleted {deleted} snapshots."))
 
     def action_browse_snapshot(self) -> None:
         table = self.query_one("#snapshot-table", DataTable)
