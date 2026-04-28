@@ -3,5 +3,6 @@ __pycache__/
 *.egg-info/
 .env
 corso.env
+config.yaml
 last_output.log
 exports/

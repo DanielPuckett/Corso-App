@@ -1,0 +1,97 @@
+-------------------------------------------------------------------------------------------------------------
+Registering a New App Registration for Corso
+-------------------------------------------------------------------------------------------------------------
+
+Sign in to the Microsoft Entra admin center using an account with Global Administrator privileges.
+Navigate to Identity > Applications > App registrations
+https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade/quickStartType~/null/sourceType/Microsoft_AAD_IAM
+
+The end result you want is this (from Overview).
+The * items are what you will need for your Corso backup. 
+
+        Display name           : Corso Backup App                     | Client credentials                    :0 certificate, * 1 secret
+      * Application (client) ID: ************************************ | Redirect URIs                         :Add a Redirect URI
+        Object ID              : ************************************ | Application ID URI                    :Add an Application ID URI
+      * Directory (tenant) ID  : ************************************ | Managed application in local directory:Corso Backup App
+        Supported account types: My organization only                 | State                                 :Activated
+
+Let's get started !
+
+1. Select +New registration.
+
+Name your application (e.g., "Corso-Backup")
+Choose the default Supported Account type: Single tenant
+Skip Redirect URI
+{Register}
+
+-------------------------------------------------------------------------------------------------------------
+Now you will be on an overview page, and we still need to generate a secret and set the permissions.
+-------------------------------------------------------------------------------------------------------------
+
+2. Select Certificates & secrets from the menu displayed under Overview and Quickstart
+
+Select +New client secret
+Give it a description [Corso Backup Secret]
+And set the expiry [90 days is good]
+
+Set a reminder in your calendar to come back here and create a new secret and update your Corso credentials scripts.
+Setting too long, and you will forget that there is an expiry and you won't remember how to create a new one.
+
+{Add} and immediately copy (use the copy icon) the value from the next page under "Value", it won't be shown again when the page is revisited!
+
+-------------------------------------------------------------------------------------------------------------
+Now we have the app and the secrets, but it can't do anything.
+Corso requires specific permissions to back up and restore data like Outlook, OneDrive, and SharePoint.
+-------------------------------------------------------------------------------------------------------------
+
+**************************************************************************************************************
+*** You may want these permissions, note how IMPORTANT it is to not share your app credentials with ANYONE ***
+**************************************************************************************************************
+
+3. Select API permissions from the menu displayed under Overview and Quickstart
+ 
+Let's learn the ropes..
+Select +Add a permission.
+Then choose Microsoft Graph
+Then choose Application permissions 
+Search "Calendars" then expand the suggestions and select [x]Calendars.ReadWrite click {Add permisisons}
+It addeded
+  ºCalendars.ReadWrite      Application Read and write calendars in all mailboxes                  Yes Granted for Daniel's Organization
+  ºUser.Read                Delegated   Sign in and read user profile                              No Granted for Daniel's Organization
+
+Now lets add then all in one shot..
+
++Add a permission, Microsoft Graph, Application
+
+Search		Add permissions
+--------------  --------------------------
+Calendars	[x]Calendars.ReadWrite
+ChannelMessage	[x]ChannelMessage.Read.All
+ChannelSettings [x]ChannelSettings.Read.All
+Chat		[x]Chat.Read.All
+Contacts	[x]Contacts.ReadWrite
+Directory	[x]Directory.Read.All
+Files		[x]Files.ReadWrite.All
+Mail		[x]Mail.ReadWrite
+Mailboxsettings	[x]MailboxSettings.Read
+Member		[x]Member.Read.Hidden
+Sites		[x]Sites.FullControl.All
+TeamMember	[x]TeamMember.Read.All
+TeamSettings	[x]TeamSettings.Read.All
+User		[x]User.Read.All
+
+{Add permissions}
+
+Verify that they are all there..
+
+After adding all permissions, you will need to Grant admin consent for [Your Org] to activate them.
+Right next to +Add a permision is √ Grant admin consent for [your org]
+
+-------------------------------------------------------------------------------------------------------------
+You now have these credentials required by Corso to backup and restore to your Microsoft 365
+	AZURE_TENANT_ID
+	AZURE_CLIENT_ID
+	AZURE_CLIENT_SECRET
+-------------------------------------------------------------------------------------------------------------
+Set that reminder in your calendar!
+

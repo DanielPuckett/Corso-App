@@ -98,8 +98,8 @@ class RestoreExportScreen(ModalScreen):
                 yield Input(placeholder="e.g. Recovery_Folder", id="destination")
                 yield Label("Collision policy:")
                 yield Select(
-                    [("copy (default)", "copy"), ("replace", "replace"), ("skip", "skip")],
-                    value="copy", id="collisions",
+                    [("skip (default)", "skip"), ("copy", "copy"), ("replace", "replace")],
+                    value="skip", id="collisions",
                 )
             with Horizontal(id="re-buttons"):
                 yield Button(f"Run {self.action.title()}", variant="warning", id="run")
@@ -136,9 +136,9 @@ class RestoreExportScreen(ModalScreen):
             coll = self.query_one("#collisions", Select).value
             if dest:
                 kwargs["destination"] = dest
-            if coll != "copy":
+            if coll != "skip":
                 kwargs["collisions"] = coll
-            output = corso.restore(cfg["scripts"]["restore"], self.service, self.backup_id, **kwargs)
+            output = corso.restore(cfg["scripts"]["stub"], self.service, self.backup_id, **kwargs)
         else:
             # Export flags differ by service
             if self.service == "exchange":
@@ -167,9 +167,14 @@ class RestoreExportScreen(ModalScreen):
                     if len(parts) > 1:
                         kwargs["folder"] = parts[1]
             export_dir = cfg.get("export_dir", "/mnt/corso_tui/exports")
-            if self.service == "onedrive":
-                export_dir += "/OneDrive"
-            output = corso.export(cfg["scripts"]["export"], self.service, self.backup_id, export_dir=export_dir, **kwargs)
+            if self.service == "sharepoint":
+                site_path = self.user_email.replace("https://", "").strip("/")
+                export_dir += f"/{site_path}"
+            else:
+                export_dir += f"/{self.user_email}"
+                if self.service == "onedrive":
+                    export_dir += "/OneDrive"
+            output = corso.export(cfg["scripts"]["stub"], self.service, self.backup_id, export_dir=export_dir, **kwargs)
 
         self.dismiss()
         self.app.push_screen(OutputScreen(f"{self.action.title()} Result", output or "Command completed."))
@@ -205,7 +210,7 @@ class DetailScreen(ModalScreen):
 
     async def _load_details(self) -> None:
         cfg = load_config()
-        self.items = await asyncio.to_thread(corso.get_details, cfg["scripts"]["query"], self.service, self.backup_id)
+        self.items = await asyncio.to_thread(corso.get_details, cfg["scripts"]["stub"], self.service, self.backup_id)
         tree = self.query_one("#detail-tree", Tree)
         tree.clear()
         tree.root.expand()
@@ -372,11 +377,14 @@ class CorsoApp(App):
         Binding("a", "mark_all_visible", "Mark All"),
         Binding("u", "unmark_all", "Unmark All"),
         Binding("s", "toggle_sort", "Sort ↑↓"),
+        Binding("f5", "refresh_users", "Refresh Users"),
     ]
 
     def __init__(self) -> None:
         super().__init__()
         self.cfg = load_config()
+        if "users" not in self.cfg or not self.cfg["users"]:
+            self.cfg["users"] = {}
         self.snapshots: list[corso.Snapshot] = []
         self.marked: set[str] = set()
         self.sort_newest_first = True
@@ -385,7 +393,7 @@ class CorsoApp(App):
         yield Header(show_clock=True)
         with Horizontal(id="top-bar"):
             yield Select(
-                [(name, name) for name in self.cfg["users"]],
+                [("All Users", "all")] + [(name, name) for name in self.cfg["users"]],
                 prompt="User", id="user-select",
             )
             yield Select(
@@ -431,9 +439,18 @@ class CorsoApp(App):
             self._status("Select both user and service first.")
             return
 
-        user_email = self.cfg["users"][user_sel]
+        user_email = None if user_sel == "all" else self.cfg["users"][user_sel]
         date_from_str = self.query_one("#date-from", Input).value.strip()
         date_to_str = self.query_one("#date-to", Input).value.strip()
+
+        # Validate dates
+        for label, val in [("From", date_from_str), ("To", date_to_str)]:
+            if val:
+                try:
+                    datetime.strptime(val, "%Y-%m-%d")
+                except ValueError:
+                    self._status(f"Invalid {label} date: {val} (use YYYY-MM-DD)")
+                    return
 
         self._status(f"⏳ Querying {svc_sel} snapshots for {user_sel}... (this may take a moment)")
         self.marked.clear()
@@ -444,7 +461,7 @@ class CorsoApp(App):
 
     async def _load(self, service: str, user_email: str, date_from: str, date_to: str) -> None:
         try:
-            all_snaps = await asyncio.to_thread(corso.list_snapshots, self.cfg["scripts"]["query"], service, user_email)
+            all_snaps = await asyncio.to_thread(corso.list_snapshots, self.cfg["scripts"]["stub"], service, user_email)
         except Exception as e:
             self._status(f"Error: {e}")
             return
@@ -535,6 +552,41 @@ class CorsoApp(App):
         direction = "newest first" if self.sort_newest_first else "oldest first"
         self._status(f"Sort: {direction}")
 
+    def action_refresh_users(self) -> None:
+        self._status("⏳ Discovering users from Exchange and OneDrive snapshots...")
+        self.run_worker(self._refresh_users())
+
+    async def _refresh_users(self) -> None:
+        stub = self.cfg["scripts"]["stub"]
+        users = set()
+        for svc in ["exchange", "onedrive"]:
+            try:
+                snaps = await asyncio.to_thread(corso.list_snapshots, stub, svc)
+                for s in snaps:
+                    if s.user and "@" in s.user:
+                        users.add(s.user)
+            except Exception:
+                pass
+
+        # Build user dict: name_before_@ -> email
+        user_dict = {}
+        for email in sorted(users):
+            name = email.split("@")[0]
+            user_dict[name] = email
+
+        # Update config and write to yaml
+        self.cfg["users"] = user_dict
+        cfg_path = Path("/mnt/corso_tui/config.yaml")
+        with open(cfg_path, "w") as f:
+            yaml.safe_dump(self.cfg, f, default_flow_style=False)
+
+        # Update the dropdown
+        user_select = self.query_one("#user-select", Select)
+        user_select.set_options(
+            [("All Users", "all")] + [(name, name) for name in user_dict]
+        )
+        self._status(f"Found {len(user_dict)} users: {', '.join(user_dict.keys())}")
+
     def action_delete_marked(self) -> None:
         if not self.marked:
             self._status("No snapshots marked for deletion.")
@@ -568,7 +620,7 @@ class CorsoApp(App):
         for i in range(0, total, batch_size):
             batch = ids[i:i + batch_size]
             self._status(f"⏳ Deleting batch {i // batch_size + 1} ({len(batch)} snapshots)...")
-            output = await asyncio.to_thread(corso.delete_snapshots, self.cfg["scripts"]["query"], service, batch)
+            output = await asyncio.to_thread(corso.delete_snapshots, self.cfg["scripts"]["stub"], service, batch)
             outputs.append(output)
             deleted += len(batch)
 
@@ -588,7 +640,9 @@ class CorsoApp(App):
         if svc_sel is Select.BLANK or user_sel is Select.BLANK:
             return
 
-        user_email = self.cfg["users"][user_sel]
+        # Get user from snapshot itself (needed for All Users mode)
+        snap = next((s for s in self.snapshots if s.id == sid), None)
+        user_email = snap.user if snap else ""
         self.push_screen(DetailScreen(svc_sel, sid, user_email))
 
 

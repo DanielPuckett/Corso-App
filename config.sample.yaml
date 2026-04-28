@@ -1,0 +1,9 @@
+users:
+  alice: alice@contoso.com
+  bob: bob@contoso.com
+
+scripts:
+  stub: /mnt/corso_tui/scripts/m365stub.sh
+
+export_dir: /mnt/corso_tui/exports
+delete_batch_size: 100

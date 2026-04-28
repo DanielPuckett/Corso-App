@@ -1,7 +1,7 @@
-"""Wrapper around corso CLI via the m365*.sh scripts."""
+"""Wrapper around corso CLI via the m365stub.sh script."""
 import subprocess
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 
 
@@ -13,38 +13,6 @@ class Snapshot:
     status: str
     user: str
     data: str
-
-
-@dataclass
-class ExchangeItem:
-    id: str
-    sender: str
-    folder: str
-    subject: str
-    received: str
-
-
-@dataclass
-class OneDriveItem:
-    id: str
-    name: str
-    parent_path: str
-    size: str
-    owner: str
-    created: str
-    modified: str
-
-
-@dataclass
-class SharePointItem:
-    id: str
-    name: str
-    library: str
-    parent_path: str
-    size: str
-    owner: str
-    created: str
-    modified: str
 
 
 def _run(script: str, args: list[str]) -> str:
@@ -64,25 +32,19 @@ def _parse_header(header: str) -> list[tuple[str, int]]:
     i = 0
     length = len(header)
     while i < length:
-        # Skip leading whitespace
         while i < length and header[i] == " ":
             i += 1
         if i >= length:
             break
-        # Start of a column name
         start = i
-        # Advance to end of column name: stop when we hit 2+ spaces or end of line
         while i < length:
             if header[i] == " ":
-                # Count consecutive spaces
                 j = i
                 while j < length and header[j] == " ":
                     j += 1
                 if j - i >= 2 or j >= length:
-                    # Column boundary
                     break
                 else:
-                    # Single space within column name (e.g. "Started at")
                     i = j
             else:
                 i += 1
@@ -106,7 +68,6 @@ def _parse_fixed_width(output: str) -> list[dict[str, str]]:
         stripped = line.strip()
         if not stripped:
             continue
-        # Detect header lines: starts with "ID" followed by spaces then another word
         if stripped.startswith("ID") and len(stripped) > 4 and stripped[2] == " ":
             cols = _parse_header(line)
             continue
@@ -120,16 +81,14 @@ def _parse_fixed_width(output: str) -> list[dict[str, str]]:
                 end = len(line)
             val = line[start:end].strip() if start < len(line) else ""
             row[name] = val
-        # Skip rows where ID is empty (malformed)
         if row.get("ID"):
             rows.append(row)
     return rows
 
 
-def list_snapshots(query_script: str, service: str, user_email: str | None = None) -> list[Snapshot]:
+def list_snapshots(stub: str, service: str, user_email: str | None = None) -> list[Snapshot]:
     """List snapshots for a service, optionally filtered by user."""
-    args = ["list", service]
-    output = _run(query_script, args)
+    output = _run(stub, ["backup", "list", service])
     rows = _parse_fixed_width(output)
     snapshots = []
     for r in rows:
@@ -151,34 +110,29 @@ def list_snapshots(query_script: str, service: str, user_email: str | None = Non
     return snapshots
 
 
-def get_details(query_script: str, service: str, backup_id: str) -> list[dict[str, str]]:
+def get_details(stub: str, service: str, backup_id: str) -> list[dict[str, str]]:
     """Get detail rows for a specific backup."""
-    args = ["details", service, "--backup", backup_id]
-    output = _run(query_script, args)
+    output = _run(stub, ["backup", "details", service, "--backup", backup_id])
     return _parse_fixed_width(output)
 
 
-def delete_snapshots(query_script: str, service: str, ids: list[str]) -> str:
+def delete_snapshots(stub: str, service: str, ids: list[str]) -> str:
     """Delete snapshots by ID. Returns output."""
-    id_str = ",".join(ids)
-    args = ["delete", service, "--backups", id_str]
-    return _run(query_script, args)
+    return _run(stub, ["backup", "delete", service, "--backups", ",".join(ids)])
 
 
-def restore(restore_script: str, service: str, backup_id: str, **kwargs) -> str:
-    """Run a restore command. kwargs become --flag value pairs."""
-    args = [service, "--backup", backup_id]
+def restore(stub: str, service: str, backup_id: str, **kwargs) -> str:
+    """Run a restore command."""
+    args = ["restore", service, "--backup", backup_id]
     for k, v in kwargs.items():
-        flag = k.replace("_", "-")
-        args.extend([f"--{flag}", v])
-    return _run(restore_script, args)
+        args.extend([f"--{k.replace('_', '-')}", v])
+    return _run(stub, args)
 
 
-def export(export_script: str, service: str, backup_id: str, export_dir: str = "/mnt/corso_tui/exports", **kwargs) -> str:
-    """Run an export command. kwargs become --flag value pairs."""
-    args = [service, "--backup", backup_id]
+def export(stub: str, service: str, backup_id: str, export_dir: str = "/mnt/corso_tui/exports", **kwargs) -> str:
+    """Run an export command."""
+    args = ["export", service, "--backup", backup_id]
     for k, v in kwargs.items():
-        flag = k.replace("_", "-")
-        args.extend([f"--{flag}", v])
+        args.extend([f"--{k.replace('_', '-')}", v])
     args.append(export_dir)
-    return _run(export_script, args)
+    return _run(stub, args)

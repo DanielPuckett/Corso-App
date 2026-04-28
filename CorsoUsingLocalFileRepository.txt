@@ -1,0 +1,42 @@
+1. Initialize a New Local Filesystem Repository
+
+If you are creating a new repository directly on your local storage, use the filesystem provider flag:
+
+corso repo init filesystem --path /path/to/your/local/backup/folder
+
+--path: The absolute path to the directory on your Linux box where backup data will be stored.
+
+2. Required Environment Variables
+
+For a local filesystem setup, you do not need AWS or S3-related variables.
+You only need the repository passphrase and your Microsoft 365 credentials.
+
+Variable                 Description
+CORSO_PASSPHRASE	 The password used to encrypt the local repository.
+CORSO_M365_CLIENT_ID	 Your Microsoft Entra ID (Azure AD) Application ID.
+CORSO_M365_CLIENT_SECRET Your Microsoft Entra ID Client Secret.
+CORSO_M365_TENANT_ID	 Your Microsoft 365 Tenant ID.
+
+3. Connecting to an Existing Local Repository 
+
+If you need to re-connect the Corso CLI to your year-old repository on the same or a new Linux machine:
+
+corso repo connect filesystem --path /path/to/your/local/backup/folder
+
+4. Configuration Persistence
+
+By default, Corso stores your active connection details in a configuration file located at
+
+ ~/.corso/corso.yaml. 
+
+For your documentation, it is useful to note that:
+
+This file caches the --path so you don't have to provide it every time you run a backup.
+
+The actual encrypted data blocks, indexes, and metadata are stored in the directory you specified during the init or connect step.
+
+5. Verification Command
+
+To verify the repository is healthy and see what you've previously backed up:
+
+corso backup list onedrive
