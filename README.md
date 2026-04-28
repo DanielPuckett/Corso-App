@@ -9,6 +9,7 @@ A terminal UI for managing [Corso](https://corsobackup.io/) Microsoft 365 backup
 - **Export** individual items or entire folders to local disk
 - **Restore** items or folders back to Microsoft 365 (in-place or to a new location)
 - **Delete** old snapshots in bulk with confirmation
+- **Discover users** automatically from existing snapshots
 
 ## Architecture
 
@@ -17,8 +18,8 @@ A terminal UI for managing [Corso](https://corsobackup.io/) Microsoft 365 backup
 │  corso-tui container                         │
 │  Python/Textual TUI                          │
 │  ├── Reads config from /mnt/corso_tui/       │
-│  ├── Calls bash scripts via subprocess       │
-│  └── Scripts spawn corso containers via      │
+│  ├── Calls bash stub script via subprocess   │
+│  └── Script spawns corso containers via      │
 │      Docker socket (sibling containers)      │
 └──────────────────────────────────────────────┘
         │                          │
@@ -31,18 +32,18 @@ A terminal UI for managing [Corso](https://corsobackup.io/) Microsoft 365 backup
 └──────────────┘
 ```
 
-The TUI container never touches credentials directly. Bash wrapper scripts handle authentication and spawn the corso container with the correct environment.
+The TUI container never touches credentials directly. A bash wrapper script handles authentication and spawns the corso container with the correct environment.
 
 ## Requirements
 
 - Docker + Docker Compose
 - Corso backup agent already configured with M365 credentials
-- Bash wrapper scripts (`m365query.sh`, `m365export.sh`, `m365restore.sh`) that accept corso subcommand arguments via `"$@"`
+- A bash wrapper script (`m365stub.sh`) that accepts corso subcommand arguments via `"$@"` (see `m365stub.sample.sh`)
 
 ## File Layout
 
 ```
-/home/user/corso-tui/       # Build files
+~/corso-tui/                   # Build files
   ├── Dockerfile
   ├── docker-compose.yaml
   ├── app.py                   # TUI application
@@ -50,11 +51,9 @@ The TUI container never touches credentials directly. Bash wrapper scripts handl
   └── requirements.txt
 
 /mnt/corso_tui/                # Runtime data (mounted rw)
-  ├── config.yaml              # User config
+  ├── config.yaml              # User config (copy from config.sample.yaml)
   ├── scripts/                 # Bash wrapper scripts
-  │   ├── m365query.sh
-  │   ├── m365export.sh
-  │   └── m365restore.sh
+  │   └── m365stub.sh          # Credential wrapper (copy from m365stub.sample.sh)
   ├── exports/                 # Exported files land here
   └── last_output.log          # Last command output for debugging
 ```
@@ -69,26 +68,26 @@ The TUI container never touches credentials directly. Bash wrapper scripts handl
 
 ## Configuration
 
-`/mnt/corso_tui/config.yaml`:
+Copy `config.sample.yaml` to `/mnt/corso_tui/config.yaml` and edit:
 
 ```yaml
 users:
-  daniel: alice@contoso.com
-  jacqui: bob@contoso.com
+  alice: alice@contoso.com
+  bob: bob@contoso.com
 
 scripts:
-  query: /mnt/corso_tui/scripts/m365query.sh
-  restore: /mnt/corso_tui/scripts/m365restore.sh
-  export: /mnt/corso_tui/scripts/m365export.sh
+  stub: /mnt/corso_tui/scripts/m365stub.sh
 
 export_dir: /mnt/corso_tui/exports
 delete_batch_size: 100
 ```
 
+Users can also be auto-discovered by pressing F5 in the app.
+
 ## Usage
 
 ```bash
-cd /home/user/corso-tui
+cd ~/corso-tui
 docker compose build
 docker compose run --rm corso-tui
 ```
@@ -106,6 +105,7 @@ docker compose run --rm corso-tui
 | `u` | Unmark all |
 | `d` | Delete marked (with confirmation) |
 | `b` | Browse snapshot contents |
+| `F5` | Refresh user list from snapshots |
 | `q` | Quit |
 
 ### Browse screen
@@ -116,33 +116,35 @@ docker compose run --rm corso-tui
 | `e` | Export selected item/folder |
 | `Esc` | Back to snapshot list |
 
-## Wrapper Scripts
+## Wrapper Script
 
-Scripts must accept corso subcommand arguments as separate positional parameters (`"$@"`). Examples of what the TUI passes:
+The stub script receives the full corso command as separate arguments via `"$@"`. Examples of what the TUI passes:
 
 ```bash
 # List snapshots
-m365query.sh list exchange
+m365stub.sh backup list exchange
 
 # Snapshot details
-m365query.sh details onedrive --backup <ID>
+m365stub.sh backup details onedrive --backup <ID>
 
 # Delete snapshots
-m365query.sh delete exchange --backups <ID1>,<ID2>
+m365stub.sh backup delete exchange --backups <ID1>,<ID2>
 
 # Export
-m365export.sh onedrive --backup <ID> --file <ITEM_ID> /mnt/corso_tui/exports/OneDrive
-m365export.sh exchange --backup <ID> --email-folder Inbox /mnt/corso_tui/exports
-m365export.sh sharepoint --backup <ID> --library Documents --folder "subfolder" /mnt/corso_tui/exports
+m365stub.sh export onedrive --backup <ID> --file <ITEM_ID> /mnt/corso_tui/exports/alice@contoso.com/OneDrive
+m365stub.sh export exchange --backup <ID> --email-folder Inbox /mnt/corso_tui/exports/alice@contoso.com
+m365stub.sh export sharepoint --backup <ID> --library Documents --folder "subfolder" /mnt/corso_tui/exports/contoso.sharepoint.com/sites/TeamSite
 
 # Restore
-m365restore.sh onedrive --backup <ID> --file <ITEM_ID> --destination /
-m365restore.sh exchange --backup <ID> --email <ITEM_ID>
-m365restore.sh sharepoint --backup <ID> --library Documents --folder "subfolder"
+m365stub.sh restore onedrive --backup <ID> --file <ITEM_ID> --destination /
+m365stub.sh restore exchange --backup <ID> --email <ITEM_ID>
+m365stub.sh restore sharepoint --backup <ID> --library Documents --folder "subfolder"
 ```
+
+See `m365stub.sample.sh` for a template.
 
 ## Platform
 
 - Raspberry Pi (aarch64), Debian
-- Docker 29.2.0, Compose v5.0.2
+- Docker + Docker Compose
 - Python 3.12, Textual 1.0.0
