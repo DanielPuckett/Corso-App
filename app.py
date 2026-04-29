@@ -189,6 +189,10 @@ class DetailScreen(ModalScreen):
         Binding("escape", "go_back", "Back"),
         Binding("r", "restore_item", "Restore"),
         Binding("e", "export_item", "Export"),
+        Binding("1", "sort_by_1", "Sort:Name/Subject"),
+        Binding("2", "sort_by_2", "Sort:Size/Sender"),
+        Binding("3", "sort_by_3", "Sort:Created/Date"),
+        Binding("4", "sort_by_4", "Sort:Modified"),
     ]
 
     def __init__(self, service: str, backup_id: str, user_email: str) -> None:
@@ -197,10 +201,11 @@ class DetailScreen(ModalScreen):
         self.backup_id = backup_id
         self.user_email = user_email
         self.items: list[dict[str, str]] = []
+        self.sort_key = "default"
 
     def compose(self) -> ComposeResult:
         with Vertical(id="detail-screen"):
-            yield Label(f"Snapshot: {self.backup_id} | \\[r]estore  \\[e]xport  \\[esc]back", id="detail-header")
+            yield Label(f"Snapshot: {self.backup_id} | \\[r]estore  \\[e]xport  \\[1-4]sort  \\[esc]back", id="detail-header")
             yield Label("⏳ Loading snapshot contents...", id="detail-status")
             yield Tree("Contents", id="detail-tree")
 
@@ -218,39 +223,117 @@ class DetailScreen(ModalScreen):
         self.query_one("#detail-status", Label).update(f"✓ {len(self.items)} items loaded")
         self.loading = False
 
+    def _parse_size_bytes(self, size_str: str) -> float:
+        """Convert corso size string to bytes for sorting."""
+        if not size_str:
+            return 0
+        parts = size_str.strip().split()
+        if len(parts) != 2:
+            return 0
+        try:
+            val = float(parts[0])
+        except ValueError:
+            return 0
+        unit = parts[1].upper()
+        multipliers = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
+        return val * multipliers.get(unit, 1)
+
+    def _sort_tree(self, node) -> None:
+        """Sort tree nodes: folders first (alpha), then files by current sort key."""
+        if not node.children:
+            return
+        folders = []
+        leaves = []
+        for child in list(node.children):
+            if child.allow_expand:
+                folders.append(child)
+            else:
+                leaves.append(child)
+        folders.sort(key=lambda n: n.label.plain.lower())
+
+        # Sort leaves based on sort_key and service
+        if self.service == "exchange":
+            if self.sort_key == "1":  # Subject
+                leaves.sort(key=lambda n: (n.data or {}).get("Subject", "").lower() if isinstance(n.data, dict) else "")
+            elif self.sort_key == "2":  # Sender
+                leaves.sort(key=lambda n: (n.data or {}).get("Sender", "").lower() if isinstance(n.data, dict) else "")
+            else:  # default / "3" = date descending
+                leaves.sort(key=lambda n: (n.data or {}).get("Received", "") if isinstance(n.data, dict) else "", reverse=True)
+        elif self.service in ("onedrive", "sharepoint"):
+            if self.sort_key == "2":  # Size
+                leaves.sort(key=lambda n: self._parse_size_bytes((n.data or {}).get("Size", "")) if isinstance(n.data, dict) else 0, reverse=True)
+            elif self.sort_key == "3":  # Created
+                leaves.sort(key=lambda n: (n.data or {}).get("Created", "") if isinstance(n.data, dict) else "", reverse=True)
+            elif self.sort_key == "4":  # Modified
+                leaves.sort(key=lambda n: (n.data or {}).get("Modified", "") if isinstance(n.data, dict) else "", reverse=True)
+            else:  # default / "1" = name
+                leaves.sort(key=lambda n: n.label.plain.lower())
+
+        node._children.clear()
+        for child in folders + leaves:
+            child._parent = node
+            node._children.append(child)
+        for child in folders:
+            self._sort_tree(child)
+
+    def _rebuild_sorted(self) -> None:
+        """Rebuild and re-sort the tree."""
+        tree = self.query_one("#detail-tree", Tree)
+        tree.clear()
+        tree.root.expand()
+        self._build_tree(tree)
+        sort_labels = {
+            "exchange": {"1": "Subject", "2": "Sender", "3": "Date", "default": "Date"},
+            "onedrive": {"1": "Name", "2": "Size", "3": "Created", "4": "Modified", "default": "Name"},
+            "sharepoint": {"1": "Name", "2": "Size", "3": "Created", "4": "Modified", "default": "Name"},
+        }
+        label = sort_labels.get(self.service, {}).get(self.sort_key, "default")
+        self.query_one("#detail-status", Label).update(f"✓ {len(self.items)} items | sorted by {label}")
+
+    def action_sort_by_1(self) -> None:
+        self.sort_key = "1"
+        self._rebuild_sorted()
+
+    def action_sort_by_2(self) -> None:
+        self.sort_key = "2"
+        self._rebuild_sorted()
+
+    def action_sort_by_3(self) -> None:
+        self.sort_key = "3"
+        self._rebuild_sorted()
+
+    def action_sort_by_4(self) -> None:
+        self.sort_key = "4"
+        self._rebuild_sorted()
+
     def _build_tree(self, tree: Tree) -> None:
-        """Build a folder tree from detail items."""
-        folders: dict = {}
+        """Build a folder tree from detail items with padded columns."""
 
         if self.service == "exchange":
-            # Group by type based on which keys are present
             cal_node = None
             contacts_node = None
             email_folders: dict = {}
 
             for item in self.items:
                 if "Organizer" in item:
-                    # Calendar event
                     if cal_node is None:
                         cal_node = tree.root.add("📅 Calendar")
                     subj = item.get("Subject", "(no subject)")
                     org = item.get("Organizer", "")
-                    starts = item.get("Starts", "")
+                    starts = item.get("Starts", "")[:16].replace("T", " ")
                     recur = item.get("Recurring", "")
-                    label = f"📅 {subj[:70]}  \\[{org}] {starts}"
+                    label = f"📅 {subj[:60]:<60s}  \\[{org}]  {starts}"
                     if recur and recur.lower() not in ("", "false"):
                         label += " 🔁"
                     node = cal_node.add_leaf(label)
                     node.data = item
                 elif "Contact Name" in item:
-                    # Contact
                     if contacts_node is None:
                         contacts_node = tree.root.add("👤 Contacts")
                     name = item.get("Contact Name", "(unknown)")
                     node = contacts_node.add_leaf(f"👤 {name}")
                     node.data = item
                 else:
-                    # Email
                     folder = item.get("Folder", "Unknown")
                     if folder not in email_folders:
                         fnode = tree.root.add(f"📁 {folder}")
@@ -258,15 +341,23 @@ class DetailScreen(ModalScreen):
                         email_folders[folder] = fnode
                     subject = item.get("Subject", "")
                     sender = item.get("Sender", "")
-                    received = item.get("Received", "")
-                    label = f"✉ {subject[:80]}  \\[{sender}] {received}"
+                    received = item.get("Received", "")[:16].replace("T", " ")
+                    label = f"✉ {subject[:60]:<60s}  {sender:<40s}  {received}"
                     node = email_folders[folder].add_leaf(label)
                     node.data = item
-        elif self.service == "onedrive":
+
+        elif self.service in ("onedrive", "sharepoint"):
             for item in self.items:
-                path = item.get("ParentPath", "")
+                if self.service == "onedrive":
+                    path = item.get("ParentPath", "")
+                else:
+                    lib = item.get("Library", "")
+                    pp = item.get("ParentPath", "")
+                    path = f"{lib}/{pp}" if pp else lib
                 name = item.get("ItemName", "")
                 size = item.get("Size", "")
+                created = item.get("Created", "")[:10]
+                modified = item.get("Modified", "")[:10]
                 parts = [p for p in path.split("/") if p]
                 current = tree.root
                 built = ""
@@ -283,35 +374,11 @@ class DetailScreen(ModalScreen):
                         node = current.add(f"📁 {part}")
                         node.data = built
                         current = node
-                label = f"📄 {name}  ({size})"
+                label = f"📄 {name:<50s}  {size:>8s}  {created}  {modified}"
                 leaf = current.add_leaf(label)
                 leaf.data = item
-        elif self.service == "sharepoint":
-            for item in self.items:
-                lib = item.get("Library", "")
-                path = item.get("ParentPath", "")
-                name = item.get("ItemName", "")
-                size = item.get("Size", "")
-                full = f"{lib}/{path}" if path else lib
-                parts = [p for p in full.split("/") if p]
-                current = tree.root
-                built = ""
-                for part in parts:
-                    built = f"{built}/{part}" if built else part
-                    found = None
-                    for child in current.children:
-                        if child.data and isinstance(child.data, str) and child.data == built:
-                            found = child
-                            break
-                    if found:
-                        current = found
-                    else:
-                        node = current.add(f"📁 {part}")
-                        node.data = built
-                        current = node
-                label = f"📄 {name}  ({size})"
-                leaf = current.add_leaf(label)
-                leaf.data = item
+
+        self._sort_tree(tree.root)
 
     def _get_selected_item(self) -> tuple | None:
         """Return selection info for the selected tree node.
