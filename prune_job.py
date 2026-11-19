@@ -123,6 +123,7 @@ class GroupPlan:
     service: str
     snaps: list  # oldest first
     keep: list = field(default_factory=list)
+    reason: dict = field(default_factory=dict)  # kept id -> why: recent | daily | monthly | ... | floor | no tier
     delete: list = field(default_factory=list)
     fails: list = field(default_factory=list)
     warns: list = field(default_factory=list)
@@ -163,27 +164,38 @@ def plan_group(snaps: list, cfg: dict, now: datetime, tz, retired: bool) -> Grou
         for _, kind in tiers:
             first_in_bucket.setdefault((kind, bucket_key(local(b), kind)), b.id)
 
-    keep_ids = set()
+    reason: dict = {}
     for b in gs:
         if keep_all_cut is None or b.started >= keep_all_cut:
-            keep_ids.add(b.id)
+            reason[b.id] = "recent"
             continue
         if not is_success(b):
             continue  # old failed/in-progress records are never kept
         tier = next((kind for cut, kind in tiers if b.started < cut), None)
         if tier is None:
-            keep_ids.add(b.id)  # older than keep_all but no tier applies: keep, to be safe
+            reason[b.id] = "no tier"  # older than keep_all but no tier applies: keep, to be safe
         elif first_in_bucket[(tier, bucket_key(local(b), tier))] == b.id:
-            keep_ids.add(b.id)
+            reason[b.id] = tier
 
     # Floor: newest N successful snapshots
     keep_last = int(cfg.get("keep_last", 3))
     if keep_last > 0:
-        keep_ids |= {b.id for b in ok_snaps[-keep_last:]}
+        for b in ok_snaps[-keep_last:]:
+            reason.setdefault(b.id, "floor")
 
-    gp.keep = [b for b in gs if b.id in keep_ids]
-    gp.delete = [b for b in gs if b.id not in keep_ids]
+    gp.reason = reason
+    gp.keep = [b for b in gs if b.id in reason]
+    gp.delete = [b for b in gs if b.id not in reason]
     return gp
+
+
+def kept_breakdown(gp: GroupPlan, cfg: dict) -> str:
+    """e.g. 'kept: 28 recent, 83 daily, 21 monthly'."""
+    order = ["recent"] + [t["keep"] for t in cfg.get("tiers", [])] + ["floor", "no tier"]
+    n: dict = {}
+    for r in gp.reason.values():
+        n[r] = n.get(r, 0) + 1
+    return "kept: " + ", ".join(f"{n[r]} {r}" for r in order if n.get(r)) if n else "kept: none"
 
 
 def plan_all(backups: list, cfg: dict, now: datetime, tz) -> list[GroupPlan]:
@@ -324,14 +336,18 @@ def maintenance_due(now_local: datetime, pcfg: dict, args) -> bool:
     return bool(day) and WEEKDAYS[now_local.weekday()] == day
 
 
-def run_job(args, cfg: dict, pcfg: dict, now: datetime) -> tuple[dict, list[str], list[str], list[str], str]:
-    """Returns (counts, attention, body, deleted_ids, maintenance summary line or '')."""
+def run_job(args, cfg: dict, pcfg: dict, now: datetime) -> tuple[dict, list[str], list[str], dict, str]:
+    """Returns (counts, attention, body, plan listing, maintenance summary line or '').
+
+    The listing ({'state', 'deletes', 'keeps'}) is written to .deletes.txt and .keeps.txt on every run,
+    whether the deletes happened, were a dry run, or were blocked by a guard."""
     tz = ZoneInfo(pcfg["timezone"]) if ZoneInfo else timezone.utc
     stub = (cfg.get("scripts") or {}).get("stub", "")
     maint = (cfg.get("scripts") or {}).get("maint", "")
     batch = int(cfg.get("delete_batch_size", 100))
     counts = {FAIL: 0, WARN: 0, SKIPPED: 0, OK: 0}
-    attention, body, deleted_ids = [], [], []
+    attention, body = [], []
+    listing = {"state": "", "deletes": [], "keeps": []}
     maint_line = ""
 
     # List
@@ -372,6 +388,7 @@ def run_job(args, cfg: dict, pcfg: dict, now: datetime) -> tuple[dict, list[str]
             attention.append(f"WARN     {name}: {m}")
         body.append(f"== {name}  {st}")
         body.append(f"  snapshots {len(gp.snaps)}, keep {len(gp.keep)}, delete {len(gp.delete)}")
+        body.append(f"  {kept_breakdown(gp, pcfg)}")
         if gp.keep:
             o, n = gp.keep[0], gp.keep[-1]
             body.append(f"  oldest kept {o.started.astimezone(tz):%Y-%m-%d %H:%M} ({fmt_age(now, o.started)})")
@@ -398,14 +415,20 @@ def run_job(args, cfg: dict, pcfg: dict, now: datetime) -> tuple[dict, list[str]
         m = f"deletion cap: would delete {len(to_delete)} of {total} ({pct:.0f}% > {cap:.0f}%); rerun with --no-cap if expected"
         attention.append(f"FAIL     {m}")
         body.append(f"  FAIL {m}")
+    row = lambda b, why="": (f"{b.service}\t{b.resource}\t{b.started.astimezone(tz):%Y-%m-%d %H:%M}\t"  # noqa: E731
+                             f"{b.status}{f' ({b.error_count} errors)' if b.error_count else ''}\t{why}\t{b.id}")
+    listing["deletes"] = [row(b) for b in to_delete]
+    listing["keeps"] = [row(b, gp.reason[b.id]) for gp in plans for b in gp.keep]
     if blocked:
+        listing["state"] = "NOT deleted: blocked by a guard (see report)"
         body.append(f"  nothing deleted (guard failed); {len(to_delete)} snapshot(s) would have been deleted")
     elif not to_delete:
         body.append("  nothing to delete")
     elif args.dry_run:
+        listing["state"] = "NOT deleted: dry run"
         body.append(f"  dry-run: would delete {len(to_delete)} of {total} snapshot(s) ({pct:.0f}%)")
-        deleted_ids += [f"{b.service}\t{b.resource}\t{b.started.astimezone(tz):%Y-%m-%d %H:%M}\t{b.id}" for b in to_delete]
     else:
+        listing["state"] = "deleted (any per-service errors are in the report)"
         by_svc: dict = {}
         for b in to_delete:
             by_svc.setdefault(b.service, []).append(b)
@@ -416,7 +439,6 @@ def run_job(args, cfg: dict, pcfg: dict, now: datetime) -> tuple[dict, list[str]
                 counts[FAIL] += 1
                 attention.append(f"FAIL     delete {e}")
                 body.append(f"  FAIL {e}")
-            deleted_ids += [f"{b.service}\t{b.resource}\t{b.started.astimezone(tz):%Y-%m-%d %H:%M}\t{b.id}" for b in bs]
     body.append("")
 
     # Maintenance (never deletes referenced data, so it runs even if deletes were blocked)
@@ -438,7 +460,7 @@ def run_job(args, cfg: dict, pcfg: dict, now: datetime) -> tuple[dict, list[str]
                 attention.append(f"FAIL     maintenance: {next(x.strip() for x in lines if 'FAIL' in x)[5:]}")
             maint_line = f"Maintenance: {st}; " + "; ".join(x.strip() for x in lines[:2])
         body.append("")
-    return counts, attention, body, deleted_ids, maint_line
+    return counts, attention, body, listing, maint_line
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -470,15 +492,15 @@ def main(argv: list[str] | None = None) -> int:
     if not locked:
         counts = {FAIL: 0, WARN: 0, SKIPPED: 1, OK: 0}
         attention = ["SKIPPED  another prune run holds the lock; nothing done"]
-        body, deleted_ids, maint_line = [], [], ""
+        body, listing, maint_line = [], None, ""
     else:
         try:
-            counts, attention, body, deleted_ids, maint_line = run_job(args, cfg, pcfg, now)
+            counts, attention, body, listing, maint_line = run_job(args, cfg, pcfg, now)
         except Exception:
             counts = {FAIL: 1, WARN: 0, SKIPPED: 0, OK: 0}
             attention = ["FAIL     unexpected error (see details)"]
             body = ["FAIL unexpected error:"] + [f"  {x}" for x in traceback.format_exc().splitlines()]
-            deleted_ids, maint_line = [], ""
+            listing, maint_line = None, ""
 
     flags = [x for x, on in (("dry-run", args.dry_run), ("no-cap", args.no_cap)) if on]
     if args.resource:
@@ -507,9 +529,13 @@ def main(argv: list[str] | None = None) -> int:
     report_path = os.path.join(pcfg["report_dir"], f"{stem}.txt")
     with open(report_path, "w") as f:
         f.write(report + "\n")
-    if deleted_ids:
-        with open(os.path.join(pcfg["report_dir"], f"{stem}.deletes.txt"), "w") as f:
-            f.write("service\tresource\tstarted (local)\tid\n" + "\n".join(deleted_ids) + "\n")
+    if listing and (listing["deletes"] or listing["keeps"]):
+        cols = "service\tresource\tstarted (local)\tstatus\t{}\tid\n"
+        for kind, extra in (("deletes", ""), ("keeps", "kept because")):
+            rows = listing[kind]
+            state = listing["state"] if kind == "deletes" else "kept"
+            with open(os.path.join(pcfg["report_dir"], f"{stem}.{kind}.txt"), "w") as f:
+                f.write(f"# {len(rows)} snapshot(s), {state}\n" + cols.format(extra) + "\n".join(rows) + ("\n" if rows else ""))
     with open(pcfg["last_report"], "w") as f:
         f.write(report + "\n")
 

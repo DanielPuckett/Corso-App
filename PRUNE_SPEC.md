@@ -2,7 +2,7 @@
 
 A daily job that checks every Corso backup group is fresh and healthy, thins old snapshots by retention policy, runs repository maintenance weekly, and emails a report. The checks are the main value; disk space is secondary.
 
-Status: built (`prune_job.py`), tested locally against simulated snapshots; not yet run against the real repo.
+Status: in use. Backlog cleanup done 2026-11-19 (10,283 of 11,711 snapshots deleted in 20.5 min; 1,428 kept across 11 groups). Maintenance passes pending.
 
 ## Background
 
@@ -61,16 +61,24 @@ Checked before any deletion. If a guard fails, nothing is deleted.
 - Script: `prune_job.py` in the corso-tui container (it already has the Docker socket and the stub). It reuses `corso.py` for listing and deleting.
 - Snapshot listing: `backup list <service> --json`, falling back to the existing fixed-width parser if the JSON lacks a field the job needs. Verified on the first dry run.
 - Deletion: `backup delete <service> --backups id1,id2,…` in batches of `delete_batch_size`.
-- Trigger: `m365backup.sh` calls the job at the end of the 06:30 run, so it never overlaps a backup and finishes well before the 2 AM rsync:
-  `cd /home/user/corso-tui && docker compose run --rm -T --entrypoint python corso-tui /app/prune_job.py >> /mnt/corso_tui/prune_cron.log 2>&1`
-  (`-T` because there is no terminal.)
+- Trigger: `m365backup.sh` calls the job at the end of the 06:30 run, so it never overlaps a backup and finishes well before the 2 AM rsync. The start hour is recorded at the top of the script so a run that ends after 07:00 still counts:
+  ```bash
+  START_HOUR=$(date +%H)        # top of m365backup.sh
+  # ... backups ...
+  if [ "$START_HOUR" = "06" ]; then
+    cd /home/user/corso-tui && /usr/bin/docker compose run --rm -T --entrypoint python corso-tui /app/prune_job.py >> /mnt/corso_tui/prune_cron.log 2>&1
+  fi
+  ```
+  `-T` because there is no terminal. On `maintenance_day` the same run also does maintenance, so there is no separate maintenance trigger. Setting `maintenance_day: ""` turns the built-in maintenance off (then trigger it with `--maintenance`).
 - Order per run: lock → list snapshots (all services) → plan → guards → delete → maintenance (if due) → report.
 - Flags: `--dry-run`, `--no-cap`, `--no-email`, `--resource NAME` (one user or site), `--maintenance`, `--no-maintenance`.
 
 ## Report
 
-- Written to `/mnt/corso_tui/prune_reports/YYYY-MM-DD_HHMMSS[-dry-run].txt` and `/mnt/corso_tui/last_prune.txt`. The full list of deleted IDs goes to `<same name>.deletes.txt`.
-- Subject: `[corso] FAIL 0 / WARN 0 / SKIPPED 0 / OK 6`.
+- Written to `/mnt/corso_tui/prune_reports/YYYY-MM-DD_HHMMSS[-dry-run].txt` and `/mnt/corso_tui/last_prune.txt`.
+- Every run writes `<same name>.deletes.txt` (planned deletes; the first line says whether they were deleted, a dry run, or blocked by a guard) and `<same name>.keeps.txt` (every kept snapshot with the reason: recent, daily, monthly or floor). Together they list every snapshot once.
+- Each group in the report shows a breakdown, e.g. `kept: 28 recent, 85 daily, 21 monthly`.
+- Subject: `[corso] FAIL 0 / WARN 0 / SKIPPED 0 / OK 11` (one count per group, plus maintenance on maintenance days).
 - Summary first: "Needs attention" (every FAIL/WARN/SKIPPED reason) or "Everything OK.", plus the maintenance result if a pass ran.
 - Details per group: resource, service, snapshots kept and deleted, oldest and newest kept, newest snapshot's status and age.
 - Email settings: `/mnt/corso_tui/.env` (same keys as restic-tui: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_TO`).

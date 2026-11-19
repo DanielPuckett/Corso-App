@@ -94,6 +94,11 @@ check([(local(b).month, local(b).day, local(b).hour) for b in old_kept] == [(4, 
       f"over 3M: first of each month: {[local(b).strftime('%m-%d %H:%M') for b in old_kept]}")
 check(80 <= len(gp.keep) <= 130, f"about 115 kept per group ({len(gp.keep)} of {len(hist)})")
 check(not gp.fails and not gp.warns, "fresh healthy group: no guard findings")
+bd = pj.kept_breakdown(gp, CFG)
+n_recent = sum(1 for b in hist if b.started >= cut7)
+check(bd == f"kept: {n_recent} recent, {len(mid_kept)} daily, {len(old_kept)} monthly", f"breakdown: {bd}")
+check(set(gp.reason) == {b.id for b in gp.keep} and set(gp.reason.values()) <= {"recent", "daily", "monthly", "floor", "no tier"},
+      "every kept snapshot has a reason")
 
 # Stable from one day to the next (only aging drops a kept snapshot)
 tomorrow = pj.plan_group(hist, CFG, NOW + timedelta(days=1), TZ, retired=False)
@@ -121,6 +126,7 @@ for b in tail[-2:]:
 gpt = pj.plan_group(tail, CFG, NOW, TZ, retired=True)
 ok_newest = [b for b in tail if b.status == "Completed"][-3:]
 check(all(b in gpt.keep for b in ok_newest), "floor: newest 3 successful kept even when newer runs failed")
+check("floor" in pj.kept_breakdown(gpt, CFG), f"floor shows in breakdown ({pj.kept_breakdown(gpt, CFG)})")
 
 # ── Guards ───────────────────────────────────────────────────────────────────
 stale = six_hourly(datetime(2026, 11, 1, tzinfo=TZ), datetime(2026, 11, 17, 18, 30, tzinfo=TZ))
@@ -214,7 +220,7 @@ check(counts[pj.FAIL] == 1 and any("deletion cap" in a for a in att) and not f.d
 
 f = Fake(data).install()
 counts, att, body, dels, ml = pj.run_job(args(dry_run=True, no_cap=True), cfgx, pcfg, NOW)
-check(counts == {pj.FAIL: 0, pj.WARN: 0, pj.SKIPPED: 0, pj.OK: 6} and not f.deleted and dels, "dry-run --no-cap: 6 OK groups, nothing deleted, list written")
+check(counts == {pj.FAIL: 0, pj.WARN: 0, pj.SKIPPED: 0, pj.OK: 6} and not f.deleted and dels["deletes"], "dry-run --no-cap: 6 OK groups, nothing deleted, list written")
 
 f = Fake(data).install()
 counts, att, body, dels, ml = pj.run_job(args(no_cap=True), cfgx, pcfg, NOW)
@@ -246,7 +252,7 @@ check(any(a.startswith("FAIL     delete onedrive") for a in att) and "exchange" 
 
 f = Fake(data).install()
 counts, att, body, dels, ml = pj.run_job(args(resource="friend", dry_run=True, no_cap=True), cfgx, pcfg, NOW)
-check(counts[pj.OK] == 3 and all("friend@example.org" in d for d in dels), "--resource alias limits to that user's 3 groups")
+check(counts[pj.OK] == 3 and all("friend@example.org" in d for d in dels["deletes"] + dels["keeps"]), "--resource alias limits to that user's 3 groups")
 
 # Maintenance
 f = Fake(after).install()
@@ -286,6 +292,20 @@ Fake(data).install()
 rc = pj.main(["--config", os.path.join(tmp, "config.yaml"), "--no-email", "--dry-run"])
 last = open(os.path.join(tmp, "last.txt")).read()
 check(rc == 1 and "Needs attention:" in last and "deletion cap" in last.split("Details")[0], "main: cap FAIL in summary, exit 1")
+rdir = os.path.join(tmp, "reports")
+dfile = max((n for n in os.listdir(rdir) if n.endswith("-dry-run.deletes.txt")), default="")
+kfile = dfile.replace(".deletes.txt", ".keeps.txt")
+check(bool(dfile) and os.path.exists(os.path.join(rdir, kfile)), "blocked dry run still writes .deletes.txt and .keeps.txt")
+dl = open(os.path.join(rdir, dfile)).read().splitlines()
+kl = open(os.path.join(rdir, kfile)).read().splitlines()
+check(dl[0].startswith("# ") and "blocked by a guard" in dl[0], f"deletes header says it was blocked ({dl[0]})")
+total_rows = len(dl) - 2 + len(kl) - 2
+check(total_rows == sum(len(v) for v in data.values()), f"deletes + keeps = every snapshot ({total_rows})")
+ids_d = {x.split("\t")[-1] for x in dl[2:]}
+ids_k = {x.split("\t")[-1] for x in kl[2:]}
+check(not ids_d & ids_k, "no snapshot is in both lists")
+check(all(x.split("\t")[4] in ("recent", "daily", "monthly", "floor", "no tier") for x in kl[2:]), "keeps file gives a reason per row")
+check("kept: " in last, "report shows the kept breakdown per group")
 
 import fcntl  # noqa: E402
 holder = open(os.path.join(tmp, "prune.lock"), "a+")
