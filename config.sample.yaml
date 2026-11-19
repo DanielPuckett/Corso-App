@@ -4,6 +4,31 @@ users:
 
 scripts:
   stub: /mnt/corso_tui/scripts/m365stub.sh
+  maint: /mnt/corso_tui/scripts/m365maint.sh   # run by prune_job.py on prune.maintenance_day
 
 export_dir: /mnt/corso_tui/exports
 delete_batch_size: 100
+
+# ── Scheduled prune (prune_job.py) ── see PRUNE_SPEC.md
+# Also uses scripts.stub and delete_batch_size from above.
+prune:
+  report_dir: /mnt/corso_tui/prune_reports
+  last_report: /mnt/corso_tui/last_prune.txt
+  env_file: /mnt/corso_tui/.env           # SMTP_* settings for the report email
+  lock_file: /mnt/corso_tui/prune.lock    # one runner at a time (maintenance uses --force)
+  repo_path: /mnt/corso/repo              # size reported before/after maintenance
+  timezone: America/Toronto               # local day/month boundaries; Corso reports UTC
+  services: [exchange, onedrive, sharepoint]
+
+  keep_last: 3                 # floor: newest N successful snapshots per group are never deleted
+  max_delete_percent: 20       # guard: abort if a run would delete more (override with --no-cap)
+  fresh_within: 7h             # guard: newest successful snapshot per group must be this recent
+  retired_resources: []        # users/sites no longer backed up: no freshness check
+
+  # Durations: h, d, w, M (months), y. Buckets: daily, weekly, monthly, halfyearly, yearly.
+  keep_all_within: 7d
+  tiers:
+    - {older_than: 7d, keep: daily}      # first successful snapshot of each local day
+    - {older_than: 3M, keep: monthly}    # first successful snapshot of each month, forever
+
+  maintenance_day: sunday      # the daily prune also runs scripts.maint on this day
