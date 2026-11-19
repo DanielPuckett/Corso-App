@@ -2,7 +2,7 @@
 
 A daily job that checks every Corso backup group is fresh and healthy, thins old snapshots by retention policy, runs repository maintenance weekly, and emails a report. The checks are the main value; disk space is secondary.
 
-Status: agreed design, not yet built. A stripped-down version of the restic-tui prune job.
+Status: built (`prune_job.py`), tested locally against simulated snapshots; not yet run against the real repo.
 
 ## Background
 

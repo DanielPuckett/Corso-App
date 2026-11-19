@@ -143,6 +143,28 @@ m365stub.sh restore sharepoint --backup <ID> --library Documents --folder "subfo
 
 See `m365stub.sample.sh` for a template.
 
+## Scheduled Prune
+
+`prune_job.py` checks that every user × service got a fresh, successful snapshot, thins old snapshots (keep all for 7 days, daily to 3 months, monthly after), runs weekly repository maintenance through `scripts.maint`, and emails a report. Full design: [PRUNE_SPEC.md](PRUNE_SPEC.md). Config: the `prune:` section of `config.yaml` (see `config.sample.yaml`). SMTP settings: `/mnt/corso_tui/.env` (see `.env.sample`). Maintenance script: see `m365maint.sample.sh`.
+
+```bash
+# Preview, change nothing
+docker compose run --rm --entrypoint python corso-tui /app/prune_job.py --dry-run --no-maintenance
+# One-time backlog cleanup, then a maintenance pass
+docker compose run --rm --entrypoint python corso-tui /app/prune_job.py --no-cap --no-maintenance
+docker compose run --rm --entrypoint python corso-tui /app/prune_job.py --maintenance
+```
+
+Called at the end of the 06:30 backup run (`-T` because there is no terminal):
+
+```
+cd /home/user/corso-tui && docker compose run --rm -T --entrypoint python corso-tui /app/prune_job.py >> /mnt/corso_tui/prune_cron.log 2>&1
+```
+
+Reports go to `/mnt/corso_tui/prune_reports/`. Tests (no Corso needed): `python3 tests/test_prune_plan.py`.
+
+Note: pressing F5 in the TUI rewrites `config.yaml` and drops its comments; the values, including `prune:`, are kept.
+
 ## Platform
 
 - Raspberry Pi (aarch64), Debian

@@ -136,3 +136,56 @@ def export(stub: str, service: str, backup_id: str, export_dir: str = "/mnt/cors
         args.extend([f"--{k.replace('_', '-')}", v])
     args.append(export_dir)
     return _run(stub, args)
+
+
+# ── Structured access for prune_job.py ───────────────────────────────────────
+
+@dataclass
+class BackupRecord:
+    """One backup from 'backup list <service> --json'."""
+    id: str
+    service: str
+    resource: str
+    started: datetime  # timezone-aware, UTC
+    status: str        # Completed | Failed | No Data | In Progress | Status Unknown
+    error_count: int
+
+
+def run(script: str, args: list[str], timeout: int = 1200) -> subprocess.CompletedProcess:
+    """Run a wrapper script and return the full result (exit code, stdout, stderr)."""
+    return subprocess.run(["bash", script] + args, capture_output=True, text=True, timeout=timeout)
+
+
+def parse_backup_list_json(service: str, stdout: str) -> list[BackupRecord]:
+    """Parse 'corso backup list <service> --json' output. Corso prints nothing for an empty repo."""
+    import json
+
+    text = stdout.strip()
+    if not text:
+        return []
+    start, end = text.find("["), text.rfind("]")
+    if start < 0 or end < start:
+        raise ValueError(f"no JSON array in corso output: {text[:200]!r}")
+    records = []
+    for b in json.loads(text[start:end + 1]):
+        stats = b.get("stats") or {}
+        raw = stats.get("startedAt") or ""
+        started = datetime.fromisoformat(
+            re.sub(r"\.(\d+)", lambda m: "." + m.group(1)[:6].ljust(6, "0"), raw.replace("Z", "+00:00"), count=1))
+        records.append(BackupRecord(
+            id=b.get("id") or stats.get("id", ""),
+            service=service,
+            resource=b.get("protectedResourceName") or b.get("protectedResourceID") or b.get("owner") or "",
+            started=started,
+            status=b.get("status", ""),
+            error_count=int(stats.get("errorCount") or 0),
+        ))
+    return records
+
+
+def list_backups(stub: str, service: str) -> list[BackupRecord]:
+    """List all backups for a service. Raises RuntimeError if corso fails."""
+    r = run(stub, ["backup", "list", service, "--json"])
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout).strip()[-500:] or f"exit code {r.returncode}")
+    return parse_backup_list_json(service, r.stdout)
