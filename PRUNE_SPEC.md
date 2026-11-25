@@ -2,7 +2,7 @@
 
 A daily job that checks every Corso backup group is fresh and healthy, thins old snapshots by retention policy, runs repository maintenance weekly, and emails a report. The checks are the main value; disk space is secondary.
 
-Status: in use. Backlog cleanup done 2026-11-19 (10,283 of 11,711 snapshots deleted in 20.5 min; 1,428 kept across 11 groups). Maintenance passes pending.
+Status: in use. Backlog cleanup done 2026-11-19 (10,283 of 11,711 snapshots deleted in 20.5 min; 1,428 kept across 11 groups). Two maintenance passes took the repo from 72 GiB to 67 GiB (5 GiB reclaimed, less than the ~9 GB estimated from the 14 MB/run measurement, which included index data later compacted).
 
 ## Background
 
@@ -53,7 +53,7 @@ Checked before any deletion. If a guard fails, nothing is deleted.
 - `--force=true` rewrites the maintenance owner to the current `user@host` and runs regardless of ownership. It does not lower the 24-hour safety margin. It also removes protection against two maintenance runs overlapping on one repo, so:
   - the job's lock must be held for the whole run;
   - the maintenance script itself takes no lock, so don't run it by hand while the job might be running (around 06:30 to 07:30 on `maintenance_day`).
-- Space is reclaimed with a delay. A pass reclaims snapshots deleted more than about 24h earlier, and may first grow the repo while it rewrites data (April: 143 → 174 → 63 GB over two passes a day apart). Daily deletes plus a weekly pass handle this without extra logic.
+- Space is reclaimed with a delay, and the clock starts at a maintenance pass, not at the delete. A pass rewrites the data still in use and marks what is unused; only a pass at least 24h after that one removes it. So the first pass after deletes usually grows the repo (April: 143 → 174 → 63 GB over two passes a day apart; November: 72 → 79 GiB on pass 1, 26 min; 79 → 67 GiB on pass 2, 4 min). With daily deletes and a weekly pass, each week's pass removes what the previous week's pass marked.
 - The report records repo size (`du -sb /mnt/corso/repo`) and free space on `/mnt/corso` before and after each pass.
 
 ## Running
@@ -119,7 +119,7 @@ prune:
 2. `--dry-run --no-maintenance`, then review the report.
 3. One run with `--no-cap --no-maintenance` to clear the backlog.
 4. `--maintenance` (pass 1; repo may grow).
-5. More than 24h later, `--maintenance` again (pass 2; space is reclaimed). Compare with the 76.6 GB before; expect at least about 9 GB less.
+5. More than 24h after pass 1, `--maintenance` again (pass 2; space is reclaimed). Compare with the size before pass 1 (76.6 GB / 72 GiB); expect at least about 9 GB less.
 6. Add the call to the end of the 06:30 `m365backup.sh` run.
 
 ## Deployment
