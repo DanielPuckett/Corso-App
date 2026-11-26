@@ -25,10 +25,20 @@ prune:
   fresh_within: 7h             # guard: newest successful snapshot per group must be this recent
   retired_resources: []        # users/sites no longer backed up: no freshness check
 
-  # Durations: h, d, w, M (months), y. Buckets: daily, weekly, monthly, halfyearly, yearly.
+  # Durations: m (minutes), h, d, w, M (months), y. Buckets: daily, weekly, monthly, halfyearly, yearly.
   keep_all_within: 7d
   tiers:
     - {older_than: 7d, keep: daily}      # first successful snapshot of each local day
     - {older_than: 3M, keep: monthly}    # first successful snapshot of each month, forever
 
   maintenance_day: sunday      # the daily prune also runs scripts.maint on this day
+
+  # Canary: a file written into M365 from outside Corso and looked up in the newest snapshot.
+  # Example laptop crontab (macOS; % must be escaped in crontab):
+  #   15 0,6,12,18 * * * date +\%Y-\%m-\%dT\%H:\%M:\%S\%z > "$HOME/OneDrive - <org>/.backup_canary"
+  # Missing from the snapshot -> FAIL; older than max_age -> WARN.
+  canaries:
+    - service: onedrive
+      resource: alice@contoso.com   # or an alias from 'users:'
+      file: .backup_canary
+      max_age: 26h

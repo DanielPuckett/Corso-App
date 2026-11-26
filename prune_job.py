@@ -47,6 +47,9 @@ DEFAULT_PRUNE = {
         {"older_than": "3M", "keep": "monthly"},
     ],
     "maintenance_day": "sunday",
+    # Files written into Microsoft 365 by something outside Corso (e.g. a laptop cron writing to OneDrive)
+    # and looked up in the newest snapshot. Empty list = no canary checks.
+    "canaries": [],
 }
 
 FAIL, WARN, SKIPPED, OK = "FAIL", "WARN", "SKIPPED", "OK"
@@ -68,11 +71,14 @@ def _sub_months(dt: datetime, n: int) -> datetime:
 
 
 def ago(now: datetime, spec: str) -> datetime:
-    """now minus a duration like '7h', '7d', '2w', '3M', '2y' (M/y are calendar-aware)."""
-    m = re.fullmatch(r"\s*(\d+)\s*([hdwMy])\s*", str(spec))
+    """now minus a duration like '30m', '7h', '7d', '2w', '3M', '2y'.
+    Lowercase m = minutes, capital M = months (M/y are calendar-aware)."""
+    m = re.fullmatch(r"\s*(\d+)\s*([mhdwMy])\s*", str(spec))
     if not m:
-        raise ValueError(f"bad duration {spec!r} (use e.g. 7h, 7d, 2w, 3M, 2y)")
+        raise ValueError(f"bad duration {spec!r} (use e.g. 30m, 7h, 7d, 2w, 3M, 2y; m = minutes, M = months)")
     n, unit = int(m.group(1)), m.group(2)
+    if unit == "m":
+        return now - timedelta(minutes=n)
     if unit == "h":
         return now - timedelta(hours=n)
     if unit == "d":
@@ -207,6 +213,59 @@ def plan_all(backups: list, cfg: dict, now: datetime, tz) -> list[GroupPlan]:
             for (res, svc), bs in sorted(groups.items(), key=lambda kv: (kv[0][0].lower(), kv[0][1]))]
 
 
+# ── Canary ───────────────────────────────────────────────────────────────────
+
+_INFO_KEY = {"onedrive": "oneDrive", "sharepoint": "sharePoint", "exchange": "exchange"}
+
+
+def check_canaries(plans: list, canaries: list, users: dict, stub: str, now: datetime) -> list[str]:
+    """For each canary, look the file up in the newest successful snapshot of its group.
+    Missing -> FAIL on the group (Corso did not capture it). Older than max_age -> WARN
+    (the writer stopped, the sync client is not uploading, or Corso is not picking up changes).
+    Returns findings that have no group to attach to."""
+    orphans = []
+    alias = {k.lower(): str(v).lower() for k, v in (users or {}).items()}
+    for can in canaries or []:
+        svc = str(can.get("service", "onedrive")).lower()
+        want = str(can.get("resource", "")).lower()
+        want = alias.get(want, want)
+        fname = can.get("file", ".backup_canary")
+        max_age = can.get("max_age", "26h")
+        gp = next((g for g in plans if g.service == svc and g.resource.lower() == want), None)
+        if gp is None:
+            orphans.append(f"canary: no {svc} backups for {can.get('resource')!r}")
+            continue
+        newest = next((b for b in reversed(gp.snaps) if is_success(b)), None)
+        if newest is None:
+            continue  # already FAIL for having no successful snapshot
+        try:
+            entries = corso.item_details(stub, svc, newest.id, fname)
+        except Exception as e:
+            gp.fails.append(f"canary check failed: {e}")
+            continue
+        key = _INFO_KEY.get(svc, svc)
+        times = []
+        for e in entries:
+            info = e.get(key) or {}
+            if info.get("itemName") == fname and info.get("modified"):
+                try:
+                    times.append(corso.parse_time(info["modified"]))
+                except ValueError:
+                    pass
+        if not times:
+            gp.fails.append(f"canary {fname} missing from newest snapshot {newest.id[:12]}")
+            continue
+        changed = max(times)
+        lag = newest.started - changed
+        if changed < ago(newest.started, max_age):
+            gp.warns.append(f"canary is stale: last changed {fmt_age(newest.started, changed).replace(' ago', '')} "
+                            f"before snapshot {newest.id[:12]} (limit {max_age}); writer asleep, sync client "
+                            "not uploading, or Corso not capturing changes")
+        else:
+            gp.notes.append(f"canary ok: changed {max(lag.total_seconds(), 0) / 60:.0f} min before snapshot {newest.id[:12]}")
+    return orphans
+
+
 # ── Actions ──────────────────────────────────────────────────────────────────
 
 def delete_backups(stub: str, service: str, ids: list[str], batch: int) -> tuple[int, list[str]]:
@@ -317,6 +376,52 @@ def send_email(subject: str, body: str, env: dict) -> str:
     return ""
 
 
+# ── Summary lines (phone-sized; full reasons stay in Details) ────────────────
+
+_SHORT = [
+    (r"^canary is stale", "canary is stale"),
+    (r"^canary \S+ missing", "canary missing"),
+    (r"^canary check failed", "canary check failed"),
+    (r"^canary: no \w+ backups for", "canary target not found"),
+    (r"^stale: newest successful snapshot is (\S+) ago", r"stale \1"),
+    (r"^no successful snapshot", "no successful snapshot"),
+    (r"^newest snapshot \S+ status '([^']+)'", r"newest snapshot \1"),
+    (r"^newest snapshot \S+ completed with (\d+) error", r"\1 errors in newest snapshot"),
+    (r"^marked retired but", "retired but still backing up"),
+    (r"^deletion cap: would delete \d+ of \d+ \((\d+)%", r"deletion cap \1%"),
+    (r"^cannot list (\w+)", r"cannot list \1"),
+    (r"^no backups at all for service (\w+)", r"no \1 backups"),
+    (r"^no backups for resource", "no backups for that resource"),
+    (r"^(\w+): deleting \d+ failed", r"delete failed (\1)"),
+    (r"^maintenance exit code", "maintenance failed"),
+    (r"timed out", "timed out"),
+    (r"scripts\.maint is not set", "maintenance not configured"),
+    (r"^another prune run holds the lock", "another run holds the lock"),
+    (r"^unexpected error", "crashed (see details)"),
+]
+
+
+def short_reason(reason: str) -> str:
+    for pat, label in _SHORT:
+        m = re.search(pat, reason)
+        if m:
+            return m.expand(label)
+    return reason if len(reason) <= 40 else reason[:39] + "…"
+
+
+def short_resource(resource: str) -> str:
+    """SharePoint site URLs -> 'sites/x' or 'root site'; users stay as they are."""
+    m = re.match(r"^https?://[^/]+/?(.*)$", resource)
+    if not m:
+        return resource
+    return m.group(1).rstrip("/") or "root site"
+
+
+def att(level: str, name: str, reason: str) -> str:
+    """One summary line, e.g. 'WARN     me@example.com / onedrive: canary is stale'."""
+    return f"{level:<8} {name + ': ' if name else ''}{short_reason(reason)}"
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def load_prune_config(cfg: dict) -> dict:
@@ -361,31 +466,39 @@ def run_job(args, cfg: dict, pcfg: dict, now: datetime) -> tuple[dict, list[str]
         if not svc_backups:
             list_errors.append(f"no backups at all for service {svc}")
         backups += svc_backups
+    alias = {k.lower(): str(v).lower() for k, v in (cfg.get("users") or {}).items()}
+    want = alias.get(args.resource.lower(), args.resource.lower()) if args.resource else ""
     if args.resource:
-        want = args.resource.lower()
-        alias = {k.lower(): str(v).lower() for k, v in (cfg.get("users") or {}).items()}
-        want = alias.get(want, want)
         backups = [b for b in backups if b.resource.lower() == want]
         list_errors = [e for e in list_errors if not e.startswith("no backups")]
         if not backups:
             list_errors.append(f"no backups for resource {args.resource!r}")
     for e in list_errors:
         counts[FAIL] += 1
-        attention.append(f"FAIL     {e}")
+        attention.append(att(FAIL, "", e))
         body.append(f"  FAIL {e}")
 
     # Plan
     plans = plan_all(backups, pcfg, now, tz)
+    canaries = pcfg.get("canaries") or []
+    if args.resource:
+        canaries = [c for c in canaries if alias.get(str(c.get("resource", "")).lower(), str(c.get("resource", "")).lower()) == want]
+    for m in check_canaries(plans, canaries, cfg.get("users"), stub, now):
+        counts[FAIL] += 1
+        list_errors.append(m)
+        attention.append(att(FAIL, "", m))
+        body.append(f"  FAIL {m}")
     total = len(backups)
     to_delete = [b for gp in plans for b in gp.delete]
     for gp in plans:
         st = FAIL if gp.fails else WARN if gp.warns else OK
         counts[st] += 1
         name = f"{gp.resource} / {gp.service}"
+        short = f"{short_resource(gp.resource)} / {gp.service}"
         for m in gp.fails:
-            attention.append(f"FAIL     {name}: {m}")
+            attention.append(att(FAIL, short, m))
         for m in gp.warns:
-            attention.append(f"WARN     {name}: {m}")
+            attention.append(att(WARN, short, m))
         body.append(f"== {name}  {st}")
         body.append(f"  snapshots {len(gp.snaps)}, keep {len(gp.keep)}, delete {len(gp.delete)}")
         body.append(f"  {kept_breakdown(gp, pcfg)}")
@@ -413,7 +526,7 @@ def run_job(args, cfg: dict, pcfg: dict, now: datetime) -> tuple[dict, list[str]
         blocked = True
         counts[FAIL] += 1
         m = f"deletion cap: would delete {len(to_delete)} of {total} ({pct:.0f}% > {cap:.0f}%); rerun with --no-cap if expected"
-        attention.append(f"FAIL     {m}")
+        attention.append(att(FAIL, "", m))
         body.append(f"  FAIL {m}")
     row = lambda b, why="": (f"{b.service}\t{b.resource}\t{b.started.astimezone(tz):%Y-%m-%d %H:%M}\t"  # noqa: E731
                              f"{b.status}{f' ({b.error_count} errors)' if b.error_count else ''}\t{why}\t{b.id}")
@@ -437,7 +550,7 @@ def run_job(args, cfg: dict, pcfg: dict, now: datetime) -> tuple[dict, list[str]
             body.append(f"  {svc}: deleted {n} of {len(bs)}")
             for e in errs:
                 counts[FAIL] += 1
-                attention.append(f"FAIL     delete {e}")
+                attention.append(att(FAIL, "", e))
                 body.append(f"  FAIL {e}")
     body.append("")
 
@@ -450,14 +563,14 @@ def run_job(args, cfg: dict, pcfg: dict, now: datetime) -> tuple[dict, list[str]
         elif not maint:
             st, lines = FAIL, ["  FAIL scripts.maint is not set in config.yaml"]
             counts[FAIL] += 1
-            attention.append("FAIL     maintenance: scripts.maint is not set")
+            attention.append(att(FAIL, "maintenance", "scripts.maint is not set"))
             body += lines
         else:
             st, lines = run_maintenance(maint, pcfg["repo_path"])
             counts[st] += 1
             body += lines
             if st == FAIL:
-                attention.append(f"FAIL     maintenance: {next(x.strip() for x in lines if 'FAIL' in x)[5:]}")
+                attention.append(att(FAIL, "maintenance", next(x.strip() for x in lines if "FAIL" in x)[5:]))
             maint_line = f"Maintenance: {st}; " + "; ".join(x.strip() for x in lines[:2])
         body.append("")
     return counts, attention, body, listing, maint_line
@@ -491,14 +604,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if not locked:
         counts = {FAIL: 0, WARN: 0, SKIPPED: 1, OK: 0}
-        attention = ["SKIPPED  another prune run holds the lock; nothing done"]
+        attention = [att(SKIPPED, "", "another prune run holds the lock; nothing done")]
         body, listing, maint_line = [], None, ""
     else:
         try:
             counts, attention, body, listing, maint_line = run_job(args, cfg, pcfg, now)
         except Exception:
             counts = {FAIL: 1, WARN: 0, SKIPPED: 0, OK: 0}
-            attention = ["FAIL     unexpected error (see details)"]
+            attention = [att(FAIL, "", "unexpected error (see details)")]
             body = ["FAIL unexpected error:"] + [f"  {x}" for x in traceback.format_exc().splitlines()]
             listing, maint_line = None, ""
 

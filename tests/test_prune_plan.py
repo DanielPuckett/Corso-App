@@ -162,9 +162,10 @@ tmp = tempfile.mkdtemp()
 
 
 class Fake:
-    def __init__(self, by_svc, list_fail=(), delete_fail=(), maint_rc=0):
+    def __init__(self, by_svc, list_fail=(), delete_fail=(), maint_rc=0, canary="ok"):
         self.by_svc, self.list_fail, self.delete_fail, self.maint_rc = by_svc, set(list_fail), set(delete_fail), maint_rc
         self.deleted, self.maint_runs = {}, 0
+        self.canary, self.details_calls = canary, []
 
     def install(self):
         def list_backups(stub, svc):
@@ -173,6 +174,19 @@ class Fake:
             return list(self.by_svc.get(svc, []))
 
         def run(script, args, timeout=1200):
+            if args[:2] == ["backup", "details"]:
+                svc, bid, fname = args[2], args[4], args[6]
+                self.details_calls.append((svc, bid, fname))
+                b = next(x for x in self.by_svc[svc] if x.id == bid)
+                if self.canary == "missing":
+                    return types.SimpleNamespace(returncode=0, stdout="", stderr="no items match")
+                if self.canary == "error":
+                    return types.SimpleNamespace(returncode=1, stdout="", stderr="repo locked")
+                age = timedelta(hours=30) if self.canary == "stale" else timedelta(minutes=15)
+                mod = (b.started - age).strftime("%Y-%m-%dT%H:%M:%S.123456789Z")
+                out = json.dumps([{"repoRef": "x", "shortRef": "y", "folder": {"displayName": "root"}},
+                                  {"repoRef": "z", "shortRef": "w", "oneDrive": {"itemName": fname, "parentPath": "", "modified": mod}}])
+                return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
             if args[:2] == ["backup", "delete"]:
                 svc, ids = args[2], args[4].split(",")
                 rc = 1 if svc in self.delete_fail else 0
@@ -248,11 +262,58 @@ check(any("friend@example.org / onedrive: stale" in a for a in att) and not f.de
 
 f = Fake(data, delete_fail=["onedrive"]).install()
 counts, att, body, dels, ml = pj.run_job(args(no_cap=True), cfgx, pcfg, NOW)
-check(any(a.startswith("FAIL     delete onedrive") for a in att) and "exchange" in f.deleted, "delete error on one service: FAIL, others proceed")
+check("FAIL     delete failed (onedrive)" in att and "exchange" in f.deleted and any("onedrive: deleting" in x for x in body),
+      "delete error on one service: FAIL, others proceed (full text in details)")
 
 f = Fake(data).install()
 counts, att, body, dels, ml = pj.run_job(args(resource="friend", dry_run=True, no_cap=True), cfgx, pcfg, NOW)
 check(counts[pj.OK] == 3 and all("friend@example.org" in d for d in dels["deletes"] + dels["keeps"]), "--resource alias limits to that user's 3 groups")
+
+# Canary (laptop writes .backup_canary into OneDrive at :15; snapshot at :30)
+pcan = dict(pcfg, canaries=[{"service": "onedrive", "resource": "friend", "file": ".backup_canary", "max_age": "26h"}])
+f = Fake(after).install()
+counts, att, body, dels, ml = pj.run_job(args(), cfgx, pcan, NOW)
+newest_od = [b for b in after["onedrive"] if b.resource == "friend@example.org"][-1]
+check(f.details_calls == [("onedrive", newest_od.id, ".backup_canary")] and counts[pj.FAIL] == 0
+      and any("canary ok: changed 15 min" in x for x in body), "canary: looked up in newest OneDrive snapshot (alias resolved) -> OK")
+f = Fake(after, canary="missing").install()
+counts, att, body, dels, ml = pj.run_job(args(no_cap=True), cfgx, pcan, NOW)
+check("FAIL     friend@example.org / onedrive: canary missing" in att and any(".backup_canary missing from newest snapshot" in x for x in body) and not f.deleted,
+      "canary missing -> FAIL on that group, deletes blocked")
+f = Fake(after, canary="stale").install()
+counts, att, body, dels, ml = pj.run_job(args(), cfgx, pcan, NOW)
+check(counts[pj.FAIL] == 0 and "WARN     friend@example.org / onedrive: canary is stale" in att and any("last changed 30.0h" in x for x in body),
+      "canary 30h old -> WARN only")
+f = Fake(after, canary="error").install()
+counts, att, body, dels, ml = pj.run_job(args(), cfgx, pcan, NOW)
+check("FAIL     friend@example.org / onedrive: canary check failed" in att and any("repo locked" in x for x in body), "canary details call fails -> FAIL")
+f = Fake(after).install()
+counts, att, body, dels, ml = pj.run_job(args(), cfgx, dict(pcfg, canaries=[{"resource": "nobody@example.org"}]), NOW)
+check("FAIL     canary target not found" in att and any("nobody@example.org" in x for x in body), "canary for unknown resource -> FAIL")
+f = Fake(after).install()
+counts, att, body, dels, ml = pj.run_job(args(resource="me@example.com"), cfgx, pcan, NOW)
+check(not f.details_calls and counts[pj.FAIL] == 0, "--resource for someone else skips the canary")
+check(pj.ago(NOW, "10m") == NOW - timedelta(minutes=10) and pj.ago(NOW, "1M").month == 10, "durations: m = minutes, M = months")
+f = Fake(after).install()
+counts, att, body, dels, ml = pj.run_job(args(), cfgx, dict(pcfg, canaries=[dict(pcan["canaries"][0], max_age="10m")]), NOW)
+check("WARN     friend@example.org / onedrive: canary is stale" in att and any("limit 10m" in x for x in body), "canary 15 min old with max_age 10m -> WARN")
+check(corso.parse_time("2026-11-26T16:44:05Z") == datetime(2026, 11, 26, 16, 44, 5, tzinfo=timezone.utc), "parse_time: plain Z time")
+
+# Short summary lines
+check(pj.short_resource("https://tenant.sharepoint.com/sites/allcompany") == "sites/allcompany"
+      and pj.short_resource("https://tenant.sharepoint.com/") == "root site" and pj.short_resource("me@example.com") == "me@example.com",
+      "summary: SharePoint URLs shortened, users unchanged")
+for reason, want in [("stale: newest successful snapshot is 12.2h ago (limit 7h)", "stale 12.2h"),
+                     ("newest snapshot c3d761f4-cb0 status 'Failed' (0.3h ago)", "newest snapshot Failed"),
+                     ("newest snapshot c3d761f4-cb0 completed with 3 error(s)", "3 errors in newest snapshot"),
+                     ("deletion cap: would delete 10283 of 11711 (88% > 20%); rerun with --no-cap if expected", "deletion cap 88%"),
+                     ("cannot list sharepoint: connection refused", "cannot list sharepoint")]:
+    check(pj.short_reason(reason) == want, f"summary: {want!r}")
+stale_sp = merged(data)
+stale_sp["sharepoint"] = [b for b in stale_sp["sharepoint"] if b.started < pj.ago(NOW, "12h")]
+f = Fake(stale_sp).install()
+counts, att, body, dels, ml = pj.run_job(args(), cfgx, pcfg, NOW)
+check(all(len(a) <= 60 for a in att) and not any("https://" in a for a in att), f"summary lines short ({max(len(a) for a in att)} chars max)")
 
 # Maintenance
 f = Fake(after).install()
@@ -264,7 +325,8 @@ check(pj.maintenance_due(sunday.astimezone(TZ), pcfg, args()) and not pj.mainten
 check(not pj.maintenance_due(sunday.astimezone(TZ), pcfg, args(no_maintenance=True)), "--no-maintenance skips Sunday")
 f = Fake(after, maint_rc=1).install()
 counts, att, body, dels, ml = pj.run_job(args(maintenance=True), cfgx, pcfg, NOW)
-check(counts[pj.FAIL] == 1 and any("maintenance exit code 1" in a for a in att), "maintenance failure -> FAIL in summary")
+check(counts[pj.FAIL] == 1 and "FAIL     maintenance: maintenance failed" in att and any("maintenance exit code 1" in x for x in body),
+      "maintenance failure -> FAIL in summary")
 f = Fake(after).install()
 counts, att, body, dels, ml = pj.run_job(args(maintenance=True, dry_run=True), cfgx, pcfg, NOW)
 check(f.maint_runs == 0 and "would run" in ml, "dry-run: maintenance not run")

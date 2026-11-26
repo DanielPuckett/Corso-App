@@ -189,3 +189,24 @@ def list_backups(stub: str, service: str) -> list[BackupRecord]:
     if r.returncode != 0:
         raise RuntimeError((r.stderr or r.stdout).strip()[-500:] or f"exit code {r.returncode}")
     return parse_backup_list_json(service, r.stdout)
+
+
+def parse_time(raw: str) -> datetime:
+    """Parse a Corso/Go RFC 3339 time (any number of fractional digits, 'Z' or offset)."""
+    return datetime.fromisoformat(
+        re.sub(r"\.(\d+)", lambda m: "." + m.group(1)[:6].ljust(6, "0"), raw.replace("Z", "+00:00"), count=1))
+
+
+def item_details(stub: str, service: str, backup_id: str, file_name: str) -> list[dict]:
+    """Details entries for files named file_name in one backup ('backup details ... --file NAME --json').
+    Corso prints nothing (exit 0) when no item matches; that returns []. Raises RuntimeError if corso fails."""
+    import json
+
+    r = run(stub, ["backup", "details", service, "--backup", backup_id, "--file", file_name, "--json"])
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout).strip()[-500:] or f"exit code {r.returncode}")
+    text = r.stdout.strip()
+    start, end = text.find("["), text.rfind("]")
+    if start < 0 or end < start:
+        return []
+    return json.loads(text[start:end + 1])

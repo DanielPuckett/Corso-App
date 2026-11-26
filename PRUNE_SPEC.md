@@ -44,6 +44,12 @@ Checked before any deletion. If a guard fails, nothing is deleted.
 - **Status**: if the newest snapshot in a group is not successful (`Failed`, `In Progress`, `Status Unknown`), that's FAIL. If it is `Completed (N errors…)`, that's WARN.
 - **Coverage**: every group that has ever existed is checked, so a user or service that silently stops being backed up goes stale and fails. Resources retired on purpose go in `retired_resources` (freshness skipped, retention still applies; a retired group with a fresh snapshot is WARN).
 - **Deletion cap**: a run may delete at most 20% of all snapshots. `--no-cap` turns this off (initial cleanup only).
+- **Canary** (`canaries` in config): a file written into Microsoft 365 from outside Corso. A laptop cron writes the time to `.backup_canary` in the root of the user's OneDrive at :15 past 00, 06, 12 and 18; the OneDrive client uploads it, and the :30 backup captures it. For the newest successful snapshot of that user's OneDrive, the job looks the file up with `backup details onedrive --backup <id> --file .backup_canary --json` (metadata only, nothing exported) and compares the file's modified time (from OneDrive's own record, so the laptop's clock doesn't matter) with the snapshot time:
+  - not in the snapshot: **FAIL** on that group, deletes blocked (Corso did not capture the change);
+  - changed more than `max_age` (default 26h) before the snapshot: **WARN** (laptop asleep or away, the OneDrive client not uploading, or Corso not picking up changes). 26h keeps overnight sleep quiet and still flags a laptop that has been off for a day;
+  - otherwise a note, e.g. `canary ok: changed 16 min before snapshot …`.
+  - Corso prints nothing when no item matches; that counts as missing. A canary whose resource has no backups at all is FAIL. `--resource` for someone else skips it.
+  - Verified 2026-11-26 against the real repo: OK (16 min), missing (wrong file name: FAIL), stale (`max_age: 5m`: WARN).
 - **Single runner**: the job takes a lock file (`/mnt/corso_tui/prune.lock`). If the lock is held, it exits with SKIPPED. See Maintenance for why.
 
 ## Maintenance
@@ -79,7 +85,7 @@ Checked before any deletion. If a guard fails, nothing is deleted.
 - Every run writes `<same name>.deletes.txt` (planned deletes; the first line says whether they were deleted, a dry run, or blocked by a guard) and `<same name>.keeps.txt` (every kept snapshot with the reason: recent, daily, monthly or floor). Together they list every snapshot once.
 - Each group in the report shows a breakdown, e.g. `kept: 28 recent, 85 daily, 21 monthly`.
 - Subject: `[corso] FAIL 0 / WARN 0 / SKIPPED 0 / OK 11` (one count per group, plus maintenance on maintenance days).
-- Summary first: "Needs attention" (every FAIL/WARN/SKIPPED reason) or "Everything OK.", plus the maintenance result if a pass ran.
+- Summary first, sized for a phone: "Needs attention" lists each FAIL/WARN/SKIPPED finding as one short line, e.g. `WARN     me@example.com / onedrive: canary is stale`, `FAIL     sites/allcompany / sharepoint: stale 12.2h` (SharePoint site URLs shortened to their path, the root site as `root site`), or "Everything OK.", plus the maintenance result if a pass ran. Full reasons are in Details.
 - Details per group: resource, service, snapshots kept and deleted, oldest and newest kept, newest snapshot's status and age.
 - Email settings: `/mnt/corso_tui/.env` (same keys as restic-tui: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_TO`).
 - Exit code: 1 if anything is FAIL or the email failed, otherwise 0.
@@ -111,7 +117,15 @@ prune:
     - {older_than: 3M, keep: monthly}
 
   maintenance_day: sunday      # the daily job also runs scripts.maint on this day
+
+  canaries:                    # files written into M365 from outside Corso
+    - service: onedrive
+      resource: me@example.com # or an alias from 'users:'
+      file: .backup_canary     # written by a laptop cron at :15
+      max_age: 26h             # older than this -> WARN
 ```
+
+Durations: `m` (minutes), `h`, `d`, `w`, `M` (months), `y`. Lowercase `m` is minutes and capital `M` is months.
 
 ## Rollout
 
