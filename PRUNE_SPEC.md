@@ -7,7 +7,7 @@ Status: in use. Backlog cleanup done 2026-11-19 (10,283 of 11,711 snapshots dele
 ## Background
 
 - The NAS cron runs `m365backup.sh` at 00:30, 06:30, 12:30 and 18:30. Each run backs up OneDrive, Exchange and SharePoint for every user, so 2 users produce 6 snapshots per run, 24 per day.
-- Chain of copies: Microsoft 365 → NAS Corso repo (`/mnt/corso/repo`) → backup server (2 AM `rsync --delete` over SSHFS) → mirror (`rsync --delete`). Deletions on the NAS reach every copy within a day. No copy keeps older snapshots, so the guards below and a first `--dry-run` are the only protection against a bad delete.
+- Chain of copies: Microsoft 365 → NAS Corso repo (`/mnt/corso/repo`) → backup server (nightly restic snapshot with 30 days of history; see restic-tui's PRUNE_SPEC.md, "Corso repo history") → mirror. Until 2026-11-26 the backup server copy was a nightly `rsync --delete`, so a bad delete reached every copy within a day; the restic history now gives 30 days to notice and roll back. The guards below and a first `--dry-run` remain the first line of protection.
 - Measured cost: a back-to-back full run with no data changes added 14.1 MB (6 snapshots). Repo growth since April (63 → 72 GB in about 6½ months, about 1.4 GB/month) matches about 14 MB per run. Almost all growth is per-snapshot metadata (each backup stores a full details list of every item, and OneDrive has 184k files), not changed data. Fewer kept snapshots means less disk.
 - Corso never runs maintenance on its own. Deleting a snapshot frees nothing until `repo maintenance` runs.
 
